@@ -13,6 +13,9 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+import tiktoken
+import logging
+from typing import Literal
 
 from tenacity import retry, stop_after_attempt, wait_fixed
 
@@ -149,3 +152,52 @@ def chat_and_parse_json_list(
     if verify_as_list and not isinstance(parsed, list):
         raise ValueError("The response is not a valid JSON list.")
     return parsed, response
+
+
+_token_counter = None
+def count_tokens(text: str) -> int:
+    """Count tokens in text."""
+    global _token_counter
+    if _token_counter is None:
+        _token_counter = TokenizerWrapper()
+    return len(_token_counter.encode(text))
+
+
+# code from NanoGraphRAG
+class TokenizerWrapper:
+    def __init__(self, tokenizer_type: Literal["tiktoken"] = "tiktoken", model_name: str = "gpt-4o"):
+        self.tokenizer_type = tokenizer_type
+        self.model_name = model_name
+        self._tokenizer = None
+        self._lazy_load_tokenizer()
+
+    def _lazy_load_tokenizer(self):
+        if self._tokenizer is not None:
+            return
+        logging.info(f"Loading tokenizer: type='{self.tokenizer_type}', name='{self.model_name}'")
+        if self.tokenizer_type == "tiktoken":
+            self._tokenizer = tiktoken.encoding_for_model(self.model_name)
+        else:
+            raise ValueError(f"Unknown tokenizer_type: {self.tokenizer_type}")
+
+    def get_tokenizer(self):
+        """提供对底层 tokenizer 对象的访问，用于特殊情况（如 decode_batch）。"""
+        self._lazy_load_tokenizer()
+        return self._tokenizer
+
+    def encode(self, text: str) -> list[int]:
+        self._lazy_load_tokenizer()
+        return self._tokenizer.encode(text)
+
+    def decode(self, tokens: list[int]) -> str:
+        self._lazy_load_tokenizer()
+        return self._tokenizer.decode(tokens)
+    
+    # +++ 新增 +++: 增加一个批量解码的方法以提高效率，并保持接口一致性
+    def decode_batch(self, tokens_list: list[list[int]]) -> list[str]:
+        self._lazy_load_tokenizer()
+        # HuggingFace tokenizer 有 decode_batch，但 tiktoken 没有，我们用列表推导来模拟
+        if self.tokenizer_type == "tiktoken":
+            return [self._tokenizer.decode(tokens) for tokens in tokens_list]
+        else:
+             raise ValueError(f"Unknown tokenizer_type: {self.tokenizer_type}")

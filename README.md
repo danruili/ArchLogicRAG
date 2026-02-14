@@ -39,20 +39,6 @@ For coding agents and automation-specific repository guidance, see `AGENTS.md`.
      ```
    - Set at least `OPENAI_API_KEY` when using extraction and text indexing.
    - Set `REPLICATE_API_TOKEN` when using image indexing.
-   - Optional indexing vars:
-     - `CHROMA_PERSIST_DIR`
-     - `CHROMA_COLLECTION_NAME`
-     - `OPENAI_EMBEDDING_MODEL`
-     - `OPENAI_EMBEDDING_DIM`
-     - `INDEX_EXTRACTION_DIR`
-     - `INDEX_REFERENCE_DIR`
-     - `INDEX_WORKSPACE_DIR`
-     - `INDEX_ENABLE_CLUSTER`
-     - `INDEX_SHOW_PROGRESS`
-     - `INDEX_RAW_DIR`
-     - `IMG_INDEX_OUTPUT_DIR`
-     - `IMG_INDEX_MAX_WORKERS`
-     - `IMG_INDEX_SHOW_PROGRESS`
 
 ### C. Downloading the WikiArch dataset
 
@@ -128,3 +114,44 @@ Default outputs:
 - Image embeddings: `data/wikiarch/index/img_index/embeddings.npy`
 - Image records: `data/wikiarch/index/img_index/records.json`
 - Metadata: `data/wikiarch/index/img_index/meta.json`
+
+### G. Run the Terminal Chatbot
+
+Start the chatbot in terminal mode:
+
+```bash
+uv run python -m src.agent.run_in_terminal
+```
+
+Optional arguments:
+- `--source-dir` (default: `data/wikiarch`)
+- `--index-dir` (default: `data/wikiarch/index`)
+- `--log-level` (`DEBUG`, `INFO`, `WARNING`, `ERROR`; default: `INFO`)
+
+Example:
+
+```bash
+uv run python -m src.agent.run_in_terminal --source-dir data/wikiarch --index-dir data/wikiarch/index --log-level INFO
+```
+
+Notes:
+- Build the text/logic index before running terminal chat (`src.pipeline.indexing.runner build`), or retrieval will fail on an empty Chroma index.
+- The chatbot will exit when you type `bye`, `exit`, or `quit`.
+
+### H. Run the Web Server
+
+Start the Flask web server:
+
+```bash
+uv run flask --app src.web.app:app run --host 0.0.0.0 --port 5000 --debug
+```
+
+Then open:
+- `http://127.0.0.1:5000/`
+- or `http://127.0.0.1:5000/chat/`
+
+Notes:
+- The web app expects source data under `data/wikiarch` (or `data/wikiarch/raw` for image assets).
+- The conversation endpoint uses the same chatbot backend as terminal mode, so ensure:
+  - `OPENAI_API_KEY` and `REPLICATE_API_TOKEN` are set for LLM and image retrieval.
+  - text/logic index is built at `data/wikiarch/index` (or configure equivalent paths)
