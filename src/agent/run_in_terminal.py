@@ -28,7 +28,8 @@ def start_bot_in_terminal(source_dir: str, index_dir: str) -> None:
         if not user_message:
             continue
 
-        response = chatbot.cycle(user_message)
+        response_payload = chatbot.cycle(user_message)
+        response = response_payload.get("content", "")
         print(f"\n\033[94mArchBot: {response}\033[0m")
 
         if "Goodbye! Have a great day!" in response:

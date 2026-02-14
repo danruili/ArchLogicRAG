@@ -22,6 +22,109 @@ const format = (text) => {
   return text.replace(/(?:\r\n|\r|\n)/g, "<br>");
 };
 
+const escapeHtml = (text) => {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+};
+
+const renderProgressPopup = (progressLogs, openByDefault = false, processingTimeMs = null) => {
+  const hasProgress = Array.isArray(progressLogs) && progressLogs.length > 0;
+  const hasTiming = Number.isFinite(processingTimeMs) && processingTimeMs >= 0;
+  if (!hasProgress && !hasTiming) {
+    return "";
+  }
+  const items = (progressLogs || [])
+    .map((line) => `<li>${escapeHtml(line)}</li>`)
+    .join("");
+  const totalTime = hasTiming
+    ? `<div class="progress-total-time">Total processing time: ${(processingTimeMs / 1000).toFixed(1)}s</div>`
+    : "";
+
+  return `
+    <details class="progress-popup" ${openByDefault ? "open" : ""}>
+      <summary>Progress${hasProgress ? ` (${progressLogs.length})` : ""}</summary>
+      <ul>${items}</ul>
+      ${totalTime}
+    </details>
+  `;
+};
+
+const renderMessageHtml = (
+  role,
+  content,
+  progressLogs = [],
+  token = null,
+  processingTimeMs = null
+) => {
+  const isAssistant = role === "assistant";
+  const body = isAssistant ? processRawResponse(content) : format(content);
+  const popup = isAssistant ? renderProgressPopup(progressLogs, false, processingTimeMs) : "";
+  const userId = token ? `id="${isAssistant ? "gpt" : "user"}_${token}"` : "";
+
+  return `
+    <div class="message">
+      <div class="user">
+        ${isAssistant ? gpt_image : user_image}
+      </div>
+      <div class="content" ${userId}>
+        ${popup}
+        ${body}
+      </div>
+    </div>
+  `;
+};
+
+const renderAssistantLiveContent = (progressLogs = []) => {
+  const popup = renderProgressPopup(progressLogs, true);
+  return `${popup}<div id="cursor"></div>`;
+};
+
+const updateAssistantProgress = (token, progressLogs = []) => {
+  const target = document.getElementById(`gpt_${token}`);
+  if (!target) return;
+  target.innerHTML = renderAssistantLiveContent(progressLogs);
+};
+
+const startProgressPolling = (token) => {
+  let active = true;
+  let latestLogs = ["Starting..."];
+
+  const poll = async () => {
+    while (active) {
+      try {
+        const res = await fetch(`/backend-api/v2/progress/${token}`);
+        if (res.ok) {
+          const payload = await res.json();
+          if (
+            Array.isArray(payload.progress_logs) &&
+            (payload.progress_logs.length > 0 || payload.done)
+          ) {
+            latestLogs = payload.progress_logs;
+            updateAssistantProgress(token, latestLogs);
+          }
+          if (payload.done) {
+            break;
+          }
+        }
+      } catch (_e) {
+        // Keep polling until final response arrives.
+      }
+      await new Promise((r) => setTimeout(r, 9000));
+    }
+  };
+
+  poll();
+
+  return () => {
+    active = false;
+    return latestLogs;
+  };
+};
+
 message_input.addEventListener("blur", () => {
   window.scrollTo(0, 0);
 });
@@ -74,6 +177,10 @@ function processRawResponse(text) {
 
 
 const ask_gpt = async (message) => {
+  let assistant_text = ``;
+  let assistant_progress_logs = [];
+  let assistant_processing_time_ms = null;
+  let stopPolling = null;
   try {
     message_input.value = ``;
     message_input.innerHTML = ``;
@@ -91,22 +198,11 @@ const ask_gpt = async (message) => {
 
     stop_generating.classList.remove(`stop_generating-hidden`);
 
-    message_box.innerHTML += `
-            <div class="message">
-                <div class="user">
-                    ${user_image}
-                </div>
-                <div class="content" id="user_${token}"> 
-                    ${format(message)}
-                </div>
-            </div>
-        `;
+    message_box.innerHTML += renderMessageHtml("user", message, [], window.token);
 
     /* .replace(/(?:\r\n|\r|\n)/g, '<br>') */
 
     message_box.scrollTop = message_box.scrollHeight;
-    window.scrollTo(0, 0);
-    await new Promise((r) => setTimeout(r, 500));
     window.scrollTo(0, 0);
 
     message_box.innerHTML += `
@@ -115,22 +211,19 @@ const ask_gpt = async (message) => {
                     ${gpt_image}
                 </div>
                 <div class="content" id="gpt_${window.token}">
-                    <div id="cursor"></div>
+                    ${renderAssistantLiveContent(["Starting..."])}
                 </div>
             </div>
         `;
 
     message_box.scrollTop = message_box.scrollHeight;
     window.scrollTo(0, 0);
-    await new Promise((r) => setTimeout(r, 1000));
-    window.scrollTo(0, 0);
-
-    const response = await fetch(`/backend-api/v2/conversation`, {
+    const responsePromise = fetch(`/backend-api/v2/conversation`, {
       method: `POST`,
       signal: window.controller.signal,
       headers: {
         "content-type": `application/json`,
-        accept: `text/event-stream`,
+        accept: `application/json`,
       },
       body: JSON.stringify({
         conversation_id: window.conversation_id,
@@ -150,16 +243,52 @@ const ask_gpt = async (message) => {
         },
       }),
     });
+    stopPolling = startProgressPolling(window.token);
+    const response = await responsePromise;
 
-    text = await response.text();
+    if (!response.ok) {
+      throw new Error(`Request failed with status ${response.status}`);
+    }
 
-    document.getElementById(`gpt_${window.token}`).innerHTML = processRawResponse(text);
+    const responseText = await response.text();
+    assistant_text = responseText;
+    try {
+      const payload = JSON.parse(responseText);
+      if (payload && typeof payload.content === "string") {
+        assistant_text = payload.content;
+      }
+      if (payload && Array.isArray(payload.progress_logs)) {
+        assistant_progress_logs = payload.progress_logs;
+      }
+      if (payload && Number.isFinite(payload.processing_time_ms)) {
+        assistant_processing_time_ms = payload.processing_time_ms;
+      }
+    } catch (_e) {
+      assistant_progress_logs = [];
+    }
+
+    if (stopPolling) {
+      const polledLogs = stopPolling();
+      if (assistant_progress_logs.length === 0 && Array.isArray(polledLogs)) {
+        assistant_progress_logs = polledLogs;
+      }
+    }
+
+    document.getElementById(`gpt_${window.token}`).innerHTML =
+      renderProgressPopup(assistant_progress_logs, false, assistant_processing_time_ms)
+      + processRawResponse(assistant_text);
 
     window.scrollTo(0, 0);
     message_box.scrollTo({ top: message_box.scrollHeight, behavior: "auto" });
 
     add_message(window.conversation_id, "user", message);
-    add_message(window.conversation_id, "assistant", text);
+    add_message(
+      window.conversation_id,
+      "assistant",
+      assistant_text,
+      assistant_progress_logs,
+      assistant_processing_time_ms
+    );
 
     message_box.scrollTop = message_box.scrollHeight;
     await remove_cancel_button();
@@ -168,6 +297,9 @@ const ask_gpt = async (message) => {
     await load_conversations(20, 0);
     window.scrollTo(0, 0);
   } catch (e) {
+    if (stopPolling) {
+      stopPolling();
+    }
     add_message(window.conversation_id, "user", message);
 
     message_box.scrollTop = message_box.scrollHeight;
@@ -188,7 +320,7 @@ const ask_gpt = async (message) => {
       add_message(window.conversation_id, "assistant", error_message);
     } else {
       document.getElementById(`gpt_${window.token}`).innerHTML += ` [aborted]`;
-      add_message(window.conversation_id, "assistant", text + ` [aborted]`);
+      add_message(window.conversation_id, "assistant", assistant_text + ` [aborted]`);
     }
 
     window.scrollTo(0, 0);
@@ -277,25 +409,13 @@ const load_conversation = async (conversation_id) => {
   console.log(conversation, conversation_id);
 
   for (item of conversation.items) {
-    message_box.innerHTML += `
-            <div class="message">
-                <div class="user">
-                    ${item.role == "assistant" ? gpt_image : user_image}
-                    ${
-                      item.role == "assistant"
-                        ? `<i class="fa-regular fa-phone-arrow-down-left"></i>`
-                        : `<i class="fa-regular fa-phone-arrow-up-right"></i>`
-                    }
-                </div>
-                <div class="content">
-                    ${
-                      item.role == "assistant"
-                        ? processRawResponse(item.content)
-                        : item.content
-                    }
-                </div>
-            </div>
-        `;
+    message_box.innerHTML += renderMessageHtml(
+      item.role,
+      item.content,
+      item.progress_logs || [],
+      null,
+      item.processing_time_ms ?? null
+    );
   }
 
   document.querySelectorAll(`code`).forEach((el) => {
@@ -329,7 +449,13 @@ const add_conversation = async (conversation_id, title) => {
   }
 };
 
-const add_message = async (conversation_id, role, content) => {
+const add_message = async (
+  conversation_id,
+  role,
+  content,
+  progress_logs = [],
+  processing_time_ms = null
+) => {
   before_adding = JSON.parse(
     localStorage.getItem(`conversation:${conversation_id}`)
   );
@@ -337,6 +463,8 @@ const add_message = async (conversation_id, role, content) => {
   before_adding.items.push({
     role: role,
     content: content,
+    progress_logs: progress_logs,
+    processing_time_ms: processing_time_ms,
   });
 
   localStorage.setItem(

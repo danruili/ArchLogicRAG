@@ -1,13 +1,14 @@
-# ArchLogicRAG
+# ArchLogicRAG: Early-stage architecture design assistance by LLMs and knowledge graphs
+
+[![DOI](https://img.shields.io/badge/DOI-10.1016/j.autcon.2025.106756-darkgreen.svg)](https://doi.org/10.1016/j.autcon.2025.106756) [![License: GNU](https://img.shields.io/badge/License-GNU-red.svg)](https://www.gnu.org/licenses/) [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/release/python-312/) [![uv Version](https://img.shields.io/badge/uv-0.8.19-purple.svg)](https://pypi.org/project/uv/) 
 
 Official code repo for "Early-stage architecture design assistance by LLMs and knowledge graphs", accepted by Automation in Construction.
 
-Thanks for visiting this repo, we are still organizing the code and files. Here is the timeline.
+We have released the code and dataset. Here is the timeline for the remaining deliverables:
 
 **Update plan**
-- [x] Feb 2026: Upload dataset, processing scripts, and indexing scripts.
-- [ ] Mar 2026: Upload source code for terminal chatbot agent.
-- [ ] Apr 2026: Upload source code for user interface. Build demo web page.
+- [x] Feb 2026: Upload dataset and source code for both terminal chatbot and web-based UI.
+- [ ] Mar 2026: Build demo web page.
 
 ## User instructions
 
@@ -69,16 +70,12 @@ Use `--help` for full options.
 
 ### E. Build and Query Text/Logic Index
 
-Indexing entrypoint:
-
-```bash
-uv run python -m src.pipeline.indexing.runner
-```
-
-- Build index from extraction JSON files:
+Build index from extraction JSON files:
   ```bash
   uv run python -m src.pipeline.indexing.runner build --force
   ```
+
+Other usage:
 - Query indexed data:
   ```bash
   uv run python -m src.pipeline.indexing.runner query "daylight strategy with facade control" --top-k 5
@@ -95,20 +92,10 @@ Default outputs:
 
 ### F. Build Image Embedding Index
 
-Image indexing entrypoint:
-
+Build image embedding index from `data/wikiarch/raw` using `data/wikiarch/index/reference/asset_id_map.json`:
 ```bash
-uv run python -m src.pipeline.indexing.img_index
+uv run python -m src.pipeline.indexing.img_index build
 ```
-
-- Build image embedding index from `data/wikiarch/raw` using `data/wikiarch/index/reference/asset_id_map.json`:
-  ```bash
-  uv run python -m src.pipeline.indexing.img_index build
-  ```
-- Show image index metadata:
-  ```bash
-  uv run python -m src.pipeline.indexing.img_index info
-  ```
 
 Default outputs:
 - Image embeddings: `data/wikiarch/index/img_index/embeddings.npy`
@@ -146,9 +133,8 @@ Start the Flask web server:
 uv run flask --app src.web.app:app run --host 0.0.0.0 --port 5000 --debug
 ```
 
-Then open:
-- `http://127.0.0.1:5000/`
-- or `http://127.0.0.1:5000/chat/`
+Then open: `http://127.0.0.1:5000/`
+
 
 Notes:
 - The web app expects source data under `data/wikiarch` (or `data/wikiarch/raw` for image assets).

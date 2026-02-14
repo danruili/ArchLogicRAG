@@ -3,6 +3,7 @@ import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from typing import Callable
 
 from tenacity import retry, stop_after_attempt, wait_fixed
 
@@ -23,6 +24,24 @@ class GeneralQA:
     def __init__(self, retriever: DesignLogicRetriever):
         self.retrieval_agent = retriever
         self.logger = logging.getLogger("GeneralQA")
+        self._progress_logs: list[str] = []
+        self._progress_callback: Callable[[str], None] | None = None
+
+    def _reset_progress_logs(self) -> None:
+        self._progress_logs = []
+
+    def set_progress_callback(self, callback: Callable[[str], None] | None) -> None:
+        self._progress_callback = callback
+
+    def _emit_progress(self, message: str) -> None:
+        self.logger.info(message)
+        self._progress_logs.append(message)
+        if self._progress_callback is not None:
+            try:
+                self._progress_callback(message)
+            except Exception:
+                # Progress reporting should not break the answer flow.
+                self.logger.exception("Failed to emit progress callback")
 
     @retry(wait=wait_fixed(2), stop=stop_after_attempt(3))
     def _general_qa_planner(
@@ -319,20 +338,27 @@ class GeneralQA:
         discard_summary: bool = False,
         context_token_limit: int = 60000,
         build_non_summary_outline: bool = False,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> tuple[str, list[dict], dict]:
-        self.logger.info(f"Planning the answer for: {user_question}...")
+        self.set_progress_callback(progress_callback)
+        self._reset_progress_logs()
+        self._emit_progress(f"Planning answer for: {user_question}")
         outline, other_info = self._general_qa_planner(
             user_question,
             discard_summary=discard_summary,
             build_non_summary_outline=build_non_summary_outline,
         )
+        self._emit_progress(f"Outline generated with {len(outline['answer'])} sections")
         refined_outline = copy.deepcopy(outline)
         _ = context_token_limit - other_info["retrieved_summary_token_length"]
 
-        self.logger.info("Retrieving the relevant documents from the database...")
+        self._emit_progress("Retrieving relevant documents from the index")
         case_token = 0
         for item in outline["answer"]:
             bulletpoints = item["bulletpoint"]
+            self._emit_progress(
+                f"Collecting evidence for section '{item['section']}' ({len(bulletpoints)} bullets)"
+            )
             item["retrieved_text"] = []
             for bulletpoint in bulletpoints:
                 textual_result, _ = self.retrieval_agent.qa_retrieve(bulletpoint)
@@ -343,10 +369,11 @@ class GeneralQA:
             summary_dict = self._general_qa_summarizer(user_question, bulletpoint, retrieved_text)
             return f"- **{summary_dict['title']}**: {summary_dict['content']}"
 
-        self.logger.info("Summarizing the retrieved documents...")
+        self._emit_progress("Summarizing retrieved evidence for each section")
         for item in outline["answer"]:
             bulletpoints = item["bulletpoint"]
             retrieved_text = item["retrieved_text"]
+            self._emit_progress(f"Summarizing section '{item['section']}'")
             with ThreadPoolExecutor() as executor:
                 updated_bulletpoints = list(
                     executor.map(process_bulletpoint, bulletpoints, retrieved_text)
@@ -355,27 +382,31 @@ class GeneralQA:
 
         composite_answer = self.__outline_to_markdown(outline)
 
-        self.logger.info("Reorganizing the final answer...")
+        self._emit_progress("Reorganizing final response")
         final_answer = self._general_qa_reorganizer(user_question, composite_answer)
+        self._emit_progress("Final response completed")
 
         refined_outline_using_non_summary = ""
         if isinstance(other_info.get("refined_outline_using_non_summary"), dict):
             refined_outline_using_non_summary = self.__outline_to_markdown(
                 other_info["refined_outline_using_non_summary"]
             )
-
-        return final_answer, [{"role": "user", "content": final_answer}], {
-            "question": user_question,
-            "naive_answer": other_info["naive_answer"],
-            "naive_outline": self.__outline_to_markdown(other_info["naive_outline"]),
-            "refined_outline": self.__outline_to_markdown(refined_outline),
-            "refined_outline_using_non_summary": refined_outline_using_non_summary,
-            "composite_answer": composite_answer,
-            "final_answer": final_answer,
-            "retrieved_summary_tokens": other_info["retrieved_summary_token_length"],
-            "retrieved_case_tokens": case_token,
-            "total_context_tokens": case_token + other_info["retrieved_summary_token_length"],
-        }
+        try:
+            return final_answer, [{"role": "user", "content": final_answer}], {
+                "question": user_question,
+                "naive_answer": other_info["naive_answer"],
+                "naive_outline": self.__outline_to_markdown(other_info["naive_outline"]),
+                "refined_outline": self.__outline_to_markdown(refined_outline),
+                "refined_outline_using_non_summary": refined_outline_using_non_summary,
+                "composite_answer": composite_answer,
+                "final_answer": final_answer,
+                "retrieved_summary_tokens": other_info["retrieved_summary_token_length"],
+                "retrieved_case_tokens": case_token,
+                "total_context_tokens": case_token + other_info["retrieved_summary_token_length"],
+                "progress_logs": list(self._progress_logs),
+            }
+        finally:
+            self.set_progress_callback(None)
 
     @staticmethod
     def __outline_to_markdown(outline: dict) -> str:

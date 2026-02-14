@@ -1,6 +1,7 @@
 import re
 import json
 import logging
+from typing import Callable
 from tenacity import retry, stop_after_attempt, wait_fixed
 
 from src.agent.rendering.references import HTML_STYLE, LinkParser
@@ -41,19 +42,23 @@ class Chatbot:
             for message in history:
                 self.chat_sequence.append({"role": message["role"], "content": message["content"]})
 
-    def cycle(self, user_message: str) -> str:
+    def cycle(self, user_message: str, progress_callback: Callable[[str], None] | None = None) -> dict:
         self.chat_sequence.append({"role": "user", "content": user_message})
         response, func_call = self.analyse_external_message()
+        progress_logs: list[str] = []
 
         if func_call:
             self.logger.info(f"Executing function call: {func_call}")
-            response, appended_msg = self.execute_function(func_call)
+            response, appended_msg, other_info = self.execute_function(
+                func_call, progress_callback=progress_callback
+            )
+            progress_logs = other_info.get("progress_logs", [])
             for msg in appended_msg:
                 self.chat_sequence.append(msg)            
 
         self.save_chat_sequence()
 
-        return response
+        return {"content": response, "progress_logs": progress_logs}
     
     def save_chat_sequence(self):
         with open(self.chat_sequence_file_path, "w", encoding="utf-8") as f:
@@ -108,15 +113,25 @@ class Chatbot:
                     return False
         return True
     
-    def execute_function(self, func_call: dict) -> tuple[str, list[dict]]:
+    def execute_function(
+        self,
+        func_call: dict,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> tuple[str, list[dict], dict]:
         func_name = func_call["function"]
+        metadata = {}
         if func_name == "search":
             query = func_call["args"]["user_query"]
             final_answer, appended_msg, other_info = self.case_search.retrieve(query)
         elif func_name == "get_answer":
             question = func_call["args"]["question"]
             discard_summary = func_call["args"].get("discard_summary", False)
-            final_answer, appended_msg, other_info = self.general_qa.main(question, discard_summary=discard_summary)
+            final_answer, appended_msg, other_info = self.general_qa.main(
+                question,
+                discard_summary=discard_summary,
+                progress_callback=progress_callback,
+            )
+            metadata["progress_logs"] = other_info.get("progress_logs", [])
         
         # use the link_parser to convert reference ids to html
         try:
@@ -126,7 +141,7 @@ class Chatbot:
             self.logger.error(f"Error in converting reference ids to html: {e}")
             final_html = final_answer
 
-        return final_html, appended_msg
+        return final_html, appended_msg, metadata
 
     def eval_qa(self, question: str, discard_summary=False)-> tuple[str, dict]:
         """
