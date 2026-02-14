@@ -1,0 +1,39 @@
+[project]
+name = "archlogicrag"
+version = "0.1.0"
+description = "Early-stage architecture design assistance by LLMs and knowledge graphs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.12.0",
+    "chromadb>=0.4.0",
+    "flask>=3.0.0",
+    "llama-index>=0.10.0",
+    "llama-index-vector-stores-chroma>=0.2.0",
+    "openai>=1.0.0",
+    "pillow>=10.0.0",
+    "requests>=2.31.0",
+    "tenacity>=8.2.0",
+    "wikipedia-api>=0.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+]
+
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "ruff>=0.1.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

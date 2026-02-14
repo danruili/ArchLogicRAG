@@ -134,6 +134,14 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Chroma vector store data (keep .gitkeep)
+chroma_data/*
+!chroma_data/.gitkeep
+
+# WikiArch downloaded assets (script creates these dirs)
+data/wikiarch/
+data/wikiarch_label/
+
 # Environments
 .env
 .envrc
