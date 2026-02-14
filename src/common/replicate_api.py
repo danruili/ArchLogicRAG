@@ -14,6 +14,10 @@ class ModalityType(str, Enum):
     TEXT = "text"
     IMAGE = "vision"
 
+EmbeddingModel = Literal["openai/clip", "imagebind"]
+DEFAULT_EMBEDDING_MODEL: EmbeddingModel = "openai/clip"
+IMAGEBIND_VERSION = "daanelson/imagebind:0383f62e173dc821ec52663ed22a076d9c970549c209666ac3db181618b7a304"
+
 class EmbeddingInput(TypedDict):
     input_data: Union[str, Path, io.BytesIO]
     modality: ModalityType
@@ -70,33 +74,57 @@ def resize_image_if_needed(image_path: Union[str, Path], max_size_kb: int = 256)
             else:
                 scale *= 0.9
 
-def get_single_embedding(input_data: Union[str, Path, io.BytesIO], modality: ModalityType) -> Optional[List[float]]:
+def _normalize_embedding_output(output: object) -> Optional[List[float]]:
+    """Normalize Replicate output into a plain embedding vector."""
+    if output is None:
+        return None
+    if isinstance(output, list):
+        return output
+    if isinstance(output, dict):
+        embedding = output.get("embedding")
+        if isinstance(embedding, list):
+            return embedding
+    return None
+
+def get_single_embedding(
+    input_data: Union[str, Path, io.BytesIO],
+    modality: ModalityType,
+    model: EmbeddingModel = DEFAULT_EMBEDDING_MODEL,
+) -> Optional[List[float]]:
     """Get embeddings for a single input (text or image)."""
     try:
+        if model == "openai/clip":
+            if modality == ModalityType.TEXT:
+                output = replicate.run("openai/clip", input={"text": str(input_data)})
+                return _normalize_embedding_output(output)
+
+            if isinstance(input_data, (str, Path)):
+                img_data = resize_image_if_needed(input_data)
+            else:
+                img_data = input_data
+            output = replicate.run("openai/clip", input={"image": img_data})
+            return _normalize_embedding_output(output)
+
         if modality == ModalityType.TEXT:
             input_dict = {
-                "text_input": input_data,
-                "modality": "text"
+                "text_input": str(input_data),
+                "modality": "text",
             }
         else:  # IMAGE
             if isinstance(input_data, (str, Path)):
-                # Resize image if needed
                 img_data = resize_image_if_needed(input_data)
                 input_dict = {
                     "input": img_data,
-                    "modality": "vision"
+                    "modality": "vision",
                 }
             else:  # Already a BytesIO object
                 input_dict = {
                     "input": input_data,
-                    "modality": "vision"
+                    "modality": "vision",
                 }
-        
-        output = replicate.run(
-            "daanelson/imagebind:0383f62e173dc821ec52663ed22a076d9c970549c209666ac3db181618b7a304",
-            input=input_dict
-        )
-        return output
+
+        output = replicate.run(IMAGEBIND_VERSION, input=input_dict)
+        return _normalize_embedding_output(output)
     except Exception as e:
         logging.error(f"Error processing input: {str(e)}")
         return None
@@ -105,7 +133,8 @@ def get_embeddings_batch(
     inputs: List[EmbeddingInput],
     max_workers: int = 4,
     show_progress: bool = True,
-    retry_attempts: int = 2
+    retry_attempts: int = 2,
+    model: EmbeddingModel = DEFAULT_EMBEDDING_MODEL,
 ) -> List[Optional[List[float]]]:
     """Base function to get embeddings for multiple inputs using parallel processing."""
     logging.basicConfig(level=logging.INFO)
@@ -119,7 +148,8 @@ def get_embeddings_batch(
         try:
             embedding = get_single_embedding(
                 input_data=input_item['input_data'],
-                modality=input_item['modality']
+                modality=input_item['modality'],
+                model=model,
             )
             if embedding is not None:
                 return idx, embedding
@@ -154,7 +184,8 @@ def batch_text_embeddings(
     texts: List[str],
     max_workers: int = 4,
     show_progress: bool = False,
-    retry_attempts: int = 2
+    retry_attempts: int = 2,
+    model: EmbeddingModel = DEFAULT_EMBEDDING_MODEL,
 ) -> List[Optional[List[float]]]:
     """
     High-level function to get embeddings for a list of texts.
@@ -168,7 +199,8 @@ def batch_text_embeddings(
         inputs=inputs,
         max_workers=max_workers,
         show_progress=show_progress,
-        retry_attempts=retry_attempts
+        retry_attempts=retry_attempts,
+        model=model,
     )
 
 def batch_image_embeddings(
@@ -177,7 +209,8 @@ def batch_image_embeddings(
     show_progress: bool = True,
     retry_attempts: int = 2,
     validate_paths: bool = True,
-    max_size_kb: int = 256
+    max_size_kb: int = 256,
+    model: EmbeddingModel = DEFAULT_EMBEDDING_MODEL,
 ) -> List[Optional[List[float]]]:
     """
     High-level function to get embeddings for a list of image paths.
@@ -224,7 +257,8 @@ def batch_image_embeddings(
         inputs=valid_inputs,
         max_workers=max_workers,
         show_progress=show_progress,
-        retry_attempts=retry_attempts
+        retry_attempts=retry_attempts,
+        model=model,
     )
 
 # Example usage
