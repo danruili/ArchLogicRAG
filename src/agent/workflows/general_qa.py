@@ -29,6 +29,7 @@ class GeneralQA:
         self,
         user_question: str,
         discard_summary: bool = False,
+        build_non_summary_outline: bool = False,
     ) -> tuple[dict, dict]:
         planning_chat_sequence: list[dict] = []
         planning_chat_sequence.append({"role": "system", "content": PROMPTS["qa_naive"]})
@@ -40,7 +41,6 @@ class GeneralQA:
         naive_json_response = _chat(planning_chat_sequence)
         planning_chat_sequence.append({"role": "assistant", "content": naive_json_response})
 
-        retrieved_non_summary, _ = self.retrieval_agent.qa_retrieve(user_question, drop_summary=True)
         retrieved_summary, _ = self.retrieval_agent.qa_retrieve(
             user_question, drop_non_summary=True
         )
@@ -55,14 +55,21 @@ class GeneralQA:
         refined_with_summary = _chat(planning_chat_sequence)
         planning_chat_sequence.pop()
 
-        planning_chat_sequence.append(
-            {
-                "role": "user",
-                "content": PROMPTS["qa_plan_improve"].format(retrieved_docs=retrieved_non_summary),
-            }
-        )
-        refined_with_non_summary = _chat(planning_chat_sequence)
-        planning_chat_sequence.pop()
+        refined_with_non_summary_json = None
+        if build_non_summary_outline:
+            retrieved_non_summary, _ = self.retrieval_agent.qa_retrieve(
+                user_question, drop_summary=True
+            )
+            planning_chat_sequence.append(
+                {
+                    "role": "user",
+                    "content": PROMPTS["qa_plan_improve"].format(
+                        retrieved_docs=retrieved_non_summary
+                    ),
+                }
+            )
+            refined_with_non_summary = _chat(planning_chat_sequence)
+            planning_chat_sequence.pop()
 
         try:
             refined_with_summary_text = re.findall(r"```json(.*)```", refined_with_summary, re.DOTALL)
@@ -86,40 +93,43 @@ class GeneralQA:
             refined_with_summary_json = json.loads(refined_with_summary_text[-1])
             assert self.__check_planning_json_format(refined_with_summary_json)
 
-            refined_with_non_summary_text = re.findall(
-                r"```json(.*)```", refined_with_non_summary, re.DOTALL
-            )
-            assert len(refined_with_non_summary_text) > 0
-            refined_with_non_summary_text = refined_with_non_summary_text[-1]
-            reorg_outline_response = _chat(
-                [
-                    {
-                        "role": "user",
-                        "content": PROMPTS["outline_reorganizer"].format(
-                            user_question=user_question,
-                            answer_outline=refined_with_non_summary_text,
-                        ),
-                    }
-                ]
-            )
-            refined_with_non_summary_text = re.findall(
-                r"```json(.*)```", reorg_outline_response, re.DOTALL
-            )
-            assert len(refined_with_non_summary_text) > 0
-            refined_with_non_summary_json = json.loads(refined_with_non_summary_text[-1])
-            assert self.__check_planning_json_format(refined_with_non_summary_json)
+            if build_non_summary_outline:
+                refined_with_non_summary_text = re.findall(
+                    r"```json(.*)```", refined_with_non_summary, re.DOTALL
+                )
+                assert len(refined_with_non_summary_text) > 0
+                refined_with_non_summary_text = refined_with_non_summary_text[-1]
+                reorg_outline_response = _chat(
+                    [
+                        {
+                            "role": "user",
+                            "content": PROMPTS["outline_reorganizer"].format(
+                                user_question=user_question,
+                                answer_outline=refined_with_non_summary_text,
+                            ),
+                        }
+                    ]
+                )
+                refined_with_non_summary_text = re.findall(
+                    r"```json(.*)```", reorg_outline_response, re.DOTALL
+                )
+                assert len(refined_with_non_summary_text) > 0
+                refined_with_non_summary_json = json.loads(refined_with_non_summary_text[-1])
+                assert self.__check_planning_json_format(refined_with_non_summary_json)
 
             naive_json_response_text = re.findall(r"```json(.*)```", naive_json_response, re.DOTALL)
             naive_json = json.loads(naive_json_response_text[-1])
         except json.JSONDecodeError:
             raise Exception("Invalid JSON response")
 
-        return refined_with_summary_json, {
+        planner_info = {
             "naive_answer": naive_result,
             "naive_outline": naive_json,
-            "refined_outline_using_non_summary": refined_with_non_summary_json,
             "retrieved_summary_token_length": retrieved_summary_token_length,
         }
+        if refined_with_non_summary_json is not None:
+            planner_info["refined_outline_using_non_summary"] = refined_with_non_summary_json
+        return refined_with_summary_json, planner_info
 
     @staticmethod
     def __check_planning_json_format(planning_response: dict) -> bool:
@@ -190,7 +200,7 @@ class GeneralQA:
             Some prompts ask for markdown with a `##` heading, but final assembly
             always adds headings, so we strip one leading heading if present.
             """
-            return text
+            # return text
             normalized = text.strip()
             return re.sub(r"^##\s+.+?\n", "", normalized, count=1).strip()
 
@@ -308,10 +318,13 @@ class GeneralQA:
         user_question: str,
         discard_summary: bool = False,
         context_token_limit: int = 60000,
+        build_non_summary_outline: bool = False,
     ) -> tuple[str, list[dict], dict]:
         self.logger.info(f"Planning the answer for: {user_question}...")
         outline, other_info = self._general_qa_planner(
-            user_question, discard_summary=discard_summary
+            user_question,
+            discard_summary=discard_summary,
+            build_non_summary_outline=build_non_summary_outline,
         )
         refined_outline = copy.deepcopy(outline)
         _ = context_token_limit - other_info["retrieved_summary_token_length"]
@@ -345,14 +358,18 @@ class GeneralQA:
         self.logger.info("Reorganizing the final answer...")
         final_answer = self._general_qa_reorganizer(user_question, composite_answer)
 
+        refined_outline_using_non_summary = ""
+        if isinstance(other_info.get("refined_outline_using_non_summary"), dict):
+            refined_outline_using_non_summary = self.__outline_to_markdown(
+                other_info["refined_outline_using_non_summary"]
+            )
+
         return final_answer, [{"role": "user", "content": final_answer}], {
             "question": user_question,
             "naive_answer": other_info["naive_answer"],
             "naive_outline": self.__outline_to_markdown(other_info["naive_outline"]),
             "refined_outline": self.__outline_to_markdown(refined_outline),
-            "refined_outline_using_non_summary": self.__outline_to_markdown(
-                other_info["refined_outline_using_non_summary"]
-            ),
+            "refined_outline_using_non_summary": refined_outline_using_non_summary,
             "composite_answer": composite_answer,
             "final_answer": final_answer,
             "retrieved_summary_tokens": other_info["retrieved_summary_token_length"],
