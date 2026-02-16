@@ -7,12 +7,14 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 
 from src.common.llm_client import _load_project_env_once
 
-VALID_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}
+VALID_IMAGE_EXTS_ORDERED = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff")
+VALID_IMAGE_EXTS = set(VALID_IMAGE_EXTS_ORDERED)
 
 
 @dataclass(slots=True)
@@ -69,16 +71,35 @@ class ArchDataImageIndexer:
                 continue
 
             image_path = self.config.raw_dir / case_name / asset_name
+            resolved_path = self._resolve_image_path(case_name, asset_name)
             records.append(
                 {
                     "asset_id": asset_id,
                     "case_name": case_name,
-                    "image_name": asset_name,
-                    "image_path": str(image_path),
-                    "exists": image_path.is_file(),
+                    "image_name": resolved_path.name if resolved_path else asset_name,
+                    "image_path": str(resolved_path) if resolved_path else str(image_path),
+                    "exists": bool(resolved_path and resolved_path.is_file()),
                 }
             )
         return records
+
+    def _candidate_image_paths(self, case_name: str, asset_name: str) -> Iterable[Path]:
+        case_dir = self.config.raw_dir / case_name
+        given_path = case_dir / asset_name
+        yield given_path
+
+        stem = Path(asset_name).stem
+        original_ext = Path(asset_name).suffix.lower()
+        for ext in VALID_IMAGE_EXTS_ORDERED:
+            if ext == original_ext:
+                continue
+            yield case_dir / f"{stem}{ext}"
+
+    def _resolve_image_path(self, case_name: str, asset_name: str) -> Path | None:
+        for candidate in self._candidate_image_paths(case_name, asset_name):
+            if candidate.is_file():
+                return candidate
+        return None
 
     def build(self, *, force: bool = False) -> ImageBuildStats:
         if not os.environ.get("REPLICATE_API_TOKEN"):
@@ -93,6 +114,21 @@ class ArchDataImageIndexer:
 
         asset_id_map = self._load_asset_id_map()
         records = self._iter_image_records(asset_id_map)
+
+        missing_records = [r for r in records if not r["exists"]]
+        if missing_records:
+            sample = "\n".join(
+                f"- {r['image_path']}" for r in missing_records[:10]
+            )
+            suffix = ""
+            if len(missing_records) > 10:
+                suffix = f"\n... and {len(missing_records) - 10} more"
+            raise FileNotFoundError(
+                "Missing image files after trying alternate extensions "
+                f"{', '.join(VALID_IMAGE_EXTS_ORDERED)}.\n"
+                "Fix the dataset paths/files before building the image index.\n"
+                f"Unresolved paths ({len(missing_records)}):\n{sample}{suffix}"
+            )
 
         image_paths = [r["image_path"] for r in records]
         embeddings = batch_image_embeddings(
@@ -113,8 +149,6 @@ class ArchDataImageIndexer:
         valid_embeddings: list[list[float]] = []
         missing_files = 0
         for record, emb in zip(records, embeddings):
-            if not record["exists"]:
-                missing_files += 1
             if emb is None:
                 continue
             valid_rows.append(record)

@@ -4,6 +4,9 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Union
 
+VALID_IMAGE_EXTS_ORDERED = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff")
+VALID_IMAGE_EXTS = set(VALID_IMAGE_EXTS_ORDERED)
+
 CASE_HTML_TEMPLATE = """
 <div class="case">
     <span>{index}{case_name}</span>
@@ -122,6 +125,12 @@ def index_images_by_id(file_path: Union[str, Path]) -> Dict[str, Dict[str, Any]]
 class LinkParser:
     def __init__(self, source_dir: str, db_dir: str):
         self.source_name = os.path.basename(source_dir)
+        self.source_root = Path(source_dir)
+        self._asset_name_cache: dict[tuple[str, str], str | None] = {}
+        self._source_candidates = [
+            self.source_root,
+            self.source_root / "raw",
+        ]
 
         ref_id_mapping_path = os.path.join(db_dir, "reference", "asset_id_map.json")
         with open(ref_id_mapping_path, "r", encoding="utf-8") as f:
@@ -130,14 +139,49 @@ class LinkParser:
         self.case_id_img_mapping = {}
         for asset_str in self.ref_id_mapping.values():
             case_name, asset_name = asset_str.split("|||")
-            if (not asset_name.endswith("txt")) and (case_name not in self.case_id_img_mapping):
-                self.case_id_img_mapping[case_name] = asset_name
+            if asset_name.endswith("txt") or case_name in self.case_id_img_mapping:
+                continue
+            resolved = self._resolve_asset_name(case_name, asset_name)
+            if resolved:
+                self.case_id_img_mapping[case_name] = resolved
 
         web_wikiarch_meta_path = os.path.join(source_dir, "web_wikiarch_meta.json")
         if os.path.exists(web_wikiarch_meta_path):
             self.img_mapping = index_images_by_id(web_wikiarch_meta_path)
         else:
             self.img_mapping = {}
+
+    def _candidate_asset_names(self, asset_name: str) -> list[str]:
+        candidates = [asset_name]
+        original_ext = Path(asset_name).suffix.lower()
+        if original_ext not in VALID_IMAGE_EXTS:
+            return candidates
+
+        stem = Path(asset_name).stem
+        for ext in VALID_IMAGE_EXTS_ORDERED:
+            if ext == original_ext:
+                continue
+            candidates.append(f"{stem}{ext}")
+        return candidates
+
+    def _asset_exists(self, case_name: str, asset_name: str) -> bool:
+        for root in self._source_candidates:
+            if (root / case_name / asset_name).is_file():
+                return True
+        return False
+
+    def _resolve_asset_name(self, case_name: str, asset_name: str) -> str | None:
+        cache_key = (case_name, asset_name)
+        if cache_key in self._asset_name_cache:
+            return self._asset_name_cache[cache_key]
+
+        for candidate in self._candidate_asset_names(asset_name):
+            if self._asset_exists(case_name, candidate):
+                self._asset_name_cache[cache_key] = candidate
+                return candidate
+
+        self._asset_name_cache[cache_key] = None
+        return None
 
     def ref_ids_to_html(self, response_text: str, mode: str = "flask") -> str:
         index_dict = {}
@@ -178,6 +222,9 @@ class LinkParser:
         _, asset_id = clean_id.split("A")
         asset_str = self.ref_id_mapping[asset_id]
         case_name, asset_name = asset_str.split("|||")
+        resolved_asset_name = self._resolve_asset_name(case_name, asset_name)
+        if resolved_asset_name:
+            asset_name = resolved_asset_name
 
         if asset_name.endswith("txt") and case_name in self.case_id_img_mapping:
             asset_name = self.case_id_img_mapping[case_name]
